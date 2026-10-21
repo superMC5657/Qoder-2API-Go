@@ -36,10 +36,19 @@ type Config struct {
 	// PAT is the ACTIVE account's token, mirrored from Accounts[ActiveAccountID]
 	// so the bridge (which binds to PAT) and every legacy reader keep working
 	// unchanged when the active account switches.
-	PAT      string      `json:"pat"`
-	Password string      `json:"password"`
-	APIKeys  []APIKey    `json:"api_keys"`
-	Stats    *stats.Data `json:"stats,omitempty"`
+	PAT string `json:"pat"`
+	// Desktop-IDE identity (all2api passthrough). When all2api has no real PAT
+	// it writes the local Qoder IDE login here and puts a region placeholder in
+	// PAT purely to satisfy the non-empty gate; the bridge then skips the PAT →
+	// jobToken exchange and authenticates with this identity instead.
+	SecurityOauthToken string      `json:"securityOauthToken,omitempty"`
+	RefreshToken       string      `json:"refreshToken,omitempty"`
+	UID                string      `json:"uid,omitempty"`
+	Nickname           string      `json:"nickname,omitempty"`
+	ExpireTime         int64       `json:"expireTime,omitempty"`
+	Password           string      `json:"password"`
+	APIKeys            []APIKey    `json:"api_keys"`
+	Stats              *stats.Data `json:"stats,omitempty"`
 	// Logs is the persisted request-log ring (metadata only), flushed out of
 	// band by the logs recorder — the JSON equivalent of Buddy-2API's logs
 	// table.
@@ -343,11 +352,26 @@ func (s *Store) load() error {
 		cfg.Accounts = []Account{}
 		needsSave = true
 	}
+	// Stamp the deployment region onto accounts that predate region-aware
+	// sidecars. Without it the pool defaults to CN, so the intl sidecar would
+	// send an intl PAT to gateway.qoder.com.cn and get "personal token is
+	// invalid". all2api launches one sidecar per deployment (distinct
+	// data paths, QODER_REGION pinned), so every account in this file belongs
+	// to that deployment; an empty Region means "not yet stamped", not "CN".
+	if region := deploymentRegion(); region != "" {
+		for i := range cfg.Accounts {
+			if cfg.Accounts[i].Region == "" {
+				cfg.Accounts[i].Region = region
+				needsSave = true
+			}
+		}
+	}
 	if cfg.PAT != "" && findAccountByPAT(cfg.Accounts, cfg.PAT) < 0 {
 		cfg.Accounts = append(cfg.Accounts, Account{
 			ID:        GenerateIDMust(),
 			PAT:       cfg.PAT,
 			Note:      "默认账号",
+			Region:    deploymentRegion(),
 			CreatedAt: time.Now().Unix(),
 		})
 		needsSave = true
@@ -519,6 +543,28 @@ func (s *Store) SetPassword(password string) error {
 
 // --- PAT ---
 
+// GetIdeIdentity returns the desktop-IDE identity supplied by all2api, if any.
+// The map mirrors the jobToken payload field names so the bridge can install it
+// as a session without a PAT exchange.
+func (s *Store) GetIdeIdentity() (map[string]interface{}, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.SecurityOauthToken == "" {
+		return nil, false
+	}
+	id := map[string]interface{}{
+		"name":               s.config.Nickname,
+		"id":                 s.config.UID,
+		"userType":           "personal_standard",
+		"securityOauthToken": s.config.SecurityOauthToken,
+		"refreshToken":       s.config.RefreshToken,
+	}
+	if s.config.ExpireTime > 0 {
+		id["expireTime"] = float64(s.config.ExpireTime)
+	}
+	return id, true
+}
+
 func (s *Store) GetPAT() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -628,6 +674,14 @@ func normalizeRegion(region string) string {
 	default:
 		return ""
 	}
+}
+
+// deploymentRegion maps the sidecar's QODER_REGION selection to the region
+// stored on accounts: "global" for the international deployment, "" (the CN
+// default) otherwise. The sidecar is always single-deployment, so every account
+// it owns belongs to that deployment.
+func deploymentRegion() string {
+	return normalizeRegion(os.Getenv("QODER_REGION"))
 }
 
 // GetAccount returns the pool entry with the given id (zero value when absent).

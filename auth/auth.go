@@ -83,10 +83,11 @@ func NormalizeRegion(name string) string {
 }
 
 // Resolve returns the region for a PAT. Region is not encoded in the token, so
-// callers that know the account's region should use RegionByName instead; this
-// keeps the historical CN default for legacy single-PAT call sites.
+// callers that know the account's region should use RegionByName instead. For
+// legacy single-PAT call sites this keeps the historical CN default, unless
+// QODER_REGION selects the international deployment (intl/global).
 func Resolve(pat string) (string, *RegionConfig) {
-	return pat, CN
+	return pat, RegionByName(os.Getenv("QODER_REGION"))
 }
 
 func AuthURL(region *RegionConfig, path string) string {

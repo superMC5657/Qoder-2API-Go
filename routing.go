@@ -76,6 +76,16 @@ func accountRegion(acc store.Account) string {
 	return "cn"
 }
 
+// accountIsIntl reports whether a stored account belongs to the international
+// deployment. Qoder International flags Free / personal_standard accounts as
+// out of quota with a long-stale reset date while the gateway keeps serving
+// chat completions, so the quota gate must not apply to those accounts (it would
+// only turn a working account into a misleading 401).
+func (p *bridgeProvider) accountIsIntl(accountID string) bool {
+	acc, ok := p.store.GetAccount(accountID)
+	return ok && accountRegion(acc) == "global"
+}
+
 // regionBase returns the accounts allowed by the filter. RegionDefault prefers
 // CN accounts and only falls back to every account when the pool has no CN one.
 func regionBase(accounts []store.Account, filter models.RegionFilter) []store.Account {
@@ -119,7 +129,9 @@ func (r *router) usable(acc store.Account, exclude map[string]bool, cfg store.Au
 	if snap.CooldownUntil > now.Unix() {
 		return false
 	}
-	if snap.IsExceeded {
+	// Intl Free accounts are permanently flagged out of quota (stale reset) yet
+	// still served upstream, so judge them by the gateway's answer instead.
+	if snap.IsExceeded && accountRegion(acc) != "global" {
 		return false
 	}
 	if applyThreshold && cfg.Enabled && snap.Total > 0 && snap.Remaining <= cfg.Threshold {

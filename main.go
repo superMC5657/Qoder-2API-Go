@@ -145,13 +145,25 @@ func (p *bridgeProvider) setOnPatChange(fn func()) {
 // holds the lock across upstream work.
 func (p *bridgeProvider) bridgeForAccount(acc store.Account) *bridge.OpenAiBridge {
 	sig := acc.PAT + "|" + acc.Region
+	// A desktop-IDE identity (when present) replaces the PAT exchange for the
+	// configured account. It is part of the signature so a refreshed identity
+	// rebuilds the bridge instead of reusing a session built from stale tokens.
+	var ideIdentity map[string]interface{}
+	if acc.PAT != "" && acc.PAT == p.store.GetPAT() {
+		if id, ok := p.store.GetIdeIdentity(); ok {
+			ideIdentity = id
+			if tok, _ := id["securityOauthToken"].(string); tok != "" {
+				sig += "|ide:" + tok
+			}
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if b, ok := p.bridges[acc.ID]; ok && p.bridgeSig[acc.ID] == sig {
 		b.SetLabel(accountLabel(acc))
 		return b
 	}
-	b := bridge.NewOpenAiBridge(acc.PAT, auth.RegionByName(acc.Region))
+	b := bridge.NewOpenAiBridge(acc.PAT, auth.RegionByName(acc.Region), ideIdentity)
 	b.SetLabel(accountLabel(acc))
 	p.bridges[acc.ID] = b
 	p.bridgeSig[acc.ID] = sig
@@ -389,11 +401,17 @@ func (p *bridgeProvider) currentBridge() *bridge.OpenAiBridge {
 			return p.bridgeForAccount(acc)
 		}
 	}
-	// Legacy: a bare PAT with no pool entry.
+	// Legacy: a bare PAT with no pool entry. Without a stored region the
+	// QODER_REGION environment selects the deployment (cn by default).
 	if pat == "" {
 		return nil
 	}
-	acc := store.Account{PAT: pat, Region: p.store.AccountRegionByPAT(pat)}
+	region := p.store.AccountRegionByPAT(pat)
+	if region == "" {
+		_, rc := auth.Resolve(pat)
+		region = rc.Name
+	}
+	acc := store.Account{PAT: pat, Region: region}
 	return p.bridgeForAccount(acc)
 }
 
@@ -614,7 +632,7 @@ func (p *bridgeProvider) applyQuotaToSnapshot(accountID string, st *auth.Account
 	snap.NextResetAtMs = st.NextResetAtMs
 	snap.CheckedAt = time.Now().Unix()
 	snap.LastError = ""
-	if st.IsQuotaExceeded {
+	if st.IsQuotaExceeded && !p.accountIsIntl(accountID) {
 		if st.NextResetAtMs > time.Now().UnixMilli() {
 			snap.CooldownUntil = st.NextResetAtMs / 1000
 		} else {

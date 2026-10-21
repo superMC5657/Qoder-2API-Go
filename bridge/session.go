@@ -54,8 +54,17 @@ func plausibleResetMs(ms int64) bool {
 // always true, degrading every request to a serialized renewal call.
 const unknownExpiryTTL = 30 * time.Minute
 
-// bootstrapSession performs a cold PAT → jobToken exchange.
+// bootstrapSession performs a cold PAT → jobToken exchange — unless a
+// desktop-IDE identity is present, in which case its access token
+// authenticates the COSY-signed session directly (no jobToken exchange or
+// /user/status round-trip). Region-agnostic.
 func (b *OpenAiBridge) bootstrapSession(ctx context.Context) error {
+	if b.ideIdentity != nil {
+		b.applyJobToken(b.ideIdentity, "")
+		b.bootstrapped.Store(true)
+		log.Printf("[bridge] IDE-identity session bootstrapped [%s] (exp=%v)", b.Region.Name, b.ideIdentity["expireTime"])
+		return nil
+	}
 	jt, err := auth.ExchangeJobToken(ctx, b.pat, b.machineID, b.machineToken, b.machineType, b.Region)
 	if err != nil {
 		return err
@@ -408,8 +417,13 @@ func (b *OpenAiBridge) invalidateOpenAPIBearer() {
 	b.openAPIMu.Unlock()
 }
 
-// doRenew renews the session token via refreshToken.
+// doRenew renews the session token via refreshToken. Sessions bootstrapped
+// from a desktop-IDE identity have no PAT exchange to renew through — their
+// credentials are expiry-managed by all2api, refresh by re-logging the IDE.
 func (b *OpenAiBridge) doRenew(ctx context.Context, force bool) error {
+	if b.ideIdentity != nil {
+		return fmt.Errorf("IDE-identity credentials are expiry-managed by all2api; re-login the Qoder IDE to refresh them")
+	}
 	b.mu.Lock()
 	rt := b.refreshToken
 	sot := b.securityOauth

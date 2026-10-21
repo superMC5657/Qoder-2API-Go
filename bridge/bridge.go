@@ -42,6 +42,9 @@ func marshalNoEscape(v interface{}) ([]byte, error) {
 type OpenAiBridge struct {
 	Region *auth.RegionConfig
 	pat    string
+	// ideIdentity is a desktop-IDE identity (all2api passthrough) that replaces
+	// the PAT → jobToken exchange when present.
+	ideIdentity map[string]interface{}
 
 	// label identifies the owning pooled account for log lines ("备注(区域)" or
 	// a masked PAT). Stored atomically because SetLabel may run again when the
@@ -106,8 +109,9 @@ func (b *OpenAiBridge) Capacity() int {
 	return cap(b.chatSlots)
 }
 
-// NewOpenAiBridge creates a new bridge for the given PAT.
-func NewOpenAiBridge(pat string, region *auth.RegionConfig) *OpenAiBridge {
+// NewOpenAiBridge creates a new bridge for the given PAT. An optional
+// desktop-IDE identity authenticates the session instead of the PAT exchange.
+func NewOpenAiBridge(pat string, region *auth.RegionConfig, ideIdentity ...map[string]interface{}) *OpenAiBridge {
 	if region == nil {
 		region = auth.CN
 	}
@@ -121,9 +125,14 @@ func NewOpenAiBridge(pat string, region *auth.RegionConfig) *OpenAiBridge {
 	if len(machineType) > 18 {
 		machineType = machineType[:18]
 	}
+	var ide map[string]interface{}
+	if len(ideIdentity) > 0 {
+		ide = ideIdentity[0]
+	}
 	b := &OpenAiBridge{
 		Region:       region,
 		pat:          pat,
+		ideIdentity:  ide,
 		machineID:    machineID,
 		machineToken: machineToken,
 		machineType:  machineType,
